@@ -27,6 +27,8 @@ model User {
   receivedFriendRequests FriendRequest[] @relation("FriendRequestTo")
   friendshipsA           Friendship[]    @relation("FriendshipA")
   friendshipsB           Friendship[]    @relation("FriendshipB")
+  messageReactions       MessageReaction[]
+  dmMessageReactions     DMMessageReaction[]
 }
 
 model FriendRequest {
@@ -96,8 +98,22 @@ model Message {
   createdAt DateTime @default(now())
   editedAt  DateTime?
 
-  channel Channel @relation(fields: [channelId], references: [id])
-  author  User    @relation(fields: [authorId], references: [id])
+  channel   Channel           @relation(fields: [channelId], references: [id])
+  author    User              @relation(fields: [authorId], references: [id])
+  reactions MessageReaction[]
+}
+
+model MessageReaction {
+  id        String   @id @default(cuid())
+  messageId String
+  userId    String
+  emoji     String
+  createdAt DateTime @default(now())
+
+  message Message @relation(fields: [messageId], references: [id])
+  user    User    @relation(fields: [userId], references: [id])
+
+  @@unique([messageId, userId, emoji])
 }
 
 model DMChannel {
@@ -124,6 +140,20 @@ model DMMessage {
   callSeconds Int?
   callParticipants Int?
 
-  dmChannel DMChannel @relation(fields: [dmChannelId], references: [id])
-  author    User      @relation(fields: [authorId], references: [id])
+  dmChannel DMChannel           @relation(fields: [dmChannelId], references: [id])
+  author    User                @relation(fields: [authorId], references: [id])
+  reactions DMMessageReaction[]
+}
+
+model DMMessageReaction {
+  id          String   @id @default(cuid())
+  dmMessageId String
+  userId      String
+  emoji       String
+  createdAt   DateTime @default(now())
+
+  dmMessage DMMessage @relation(fields: [dmMessageId], references: [id])
+  user      User      @relation(fields: [userId], references: [id])
+
+  @@unique([dmMessageId, userId, emoji])
 }

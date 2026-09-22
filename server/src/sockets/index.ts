@@ -1,6 +1,9 @@
 import type { Server, Socket } from "socket.io";
 import { prisma } from "../db";
 import { verifyToken } from "../auth";
+import { groupReactions } from "../reactions";
+
+const ALLOWED_REACTIONS = new Set(["👍", "❤️", "😂", "😮", "😢", "🔥"]);
 
 interface SocketData {
   userId: string;
@@ -189,6 +192,52 @@ export function registerSocketHandlers(io: Server) {
       // covered here, and adding that room would deliver the message twice to
       // anyone who also joined it.
       io.to(`user:${channel.userAId}`).to(`user:${channel.userBId}`).emit("dm:new", message);
+    });
+
+    socket.on("reaction:toggle", async ({ messageId, emoji }: { messageId: string; emoji: string }) => {
+      if (!messageId || !ALLOWED_REACTIONS.has(emoji)) return;
+
+      const message = await prisma.message.findUnique({ where: { id: messageId } });
+      if (!message) return;
+      const channel = await prisma.channel.findUnique({ where: { id: message.channelId } });
+      if (!channel) return;
+      const membership = await prisma.serverMember.findUnique({
+        where: { userId_serverId: { userId, serverId: channel.serverId } },
+      });
+      if (!membership) return;
+
+      const existing = await prisma.messageReaction.findUnique({
+        where: { messageId_userId_emoji: { messageId, userId, emoji } },
+      });
+      if (existing) {
+        await prisma.messageReaction.delete({ where: { id: existing.id } });
+      } else {
+        await prisma.messageReaction.create({ data: { messageId, userId, emoji } });
+      }
+
+      const rows = await prisma.messageReaction.findMany({ where: { messageId }, select: { emoji: true, userId: true } });
+      io.to(`channel:${message.channelId}`).emit("message:reactions", { messageId, reactions: groupReactions(rows) });
+    });
+
+    socket.on("dm:reaction:toggle", async ({ dmMessageId, emoji }: { dmMessageId: string; emoji: string }) => {
+      if (!dmMessageId || !ALLOWED_REACTIONS.has(emoji)) return;
+
+      const message = await prisma.dMMessage.findUnique({ where: { id: dmMessageId } });
+      if (!message) return;
+      const channel = await prisma.dMChannel.findUnique({ where: { id: message.dmChannelId } });
+      if (!channel || (channel.userAId !== userId && channel.userBId !== userId)) return;
+
+      const existing = await prisma.dMMessageReaction.findUnique({
+        where: { dmMessageId_userId_emoji: { dmMessageId, userId, emoji } },
+      });
+      if (existing) {
+        await prisma.dMMessageReaction.delete({ where: { id: existing.id } });
+      } else {
+        await prisma.dMMessageReaction.create({ data: { dmMessageId, userId, emoji } });
+      }
+
+      const rows = await prisma.dMMessageReaction.findMany({ where: { dmMessageId }, select: { emoji: true, userId: true } });
+      io.to(`user:${channel.userAId}`).to(`user:${channel.userBId}`).emit("dm:reactions", { dmMessageId, reactions: groupReactions(rows) });
     });
 
     socket.on("typing", ({ channelId }: { channelId: string }) => {

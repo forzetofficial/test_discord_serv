@@ -2,6 +2,7 @@ import { Router } from "express";
 import { prisma } from "../db";
 import { requireAuth, type AuthedRequest } from "../auth";
 import { getIO } from "../io";
+import { groupReactions } from "../reactions";
 
 const router = Router();
 
@@ -65,10 +66,15 @@ router.get("/:id/messages", requireAuth, async (req: AuthedRequest, res) => {
     where: { dmChannelId: channel.id, ...(before ? { createdAt: { lt: before } } : {}) },
     orderBy: { createdAt: "desc" },
     take: limit,
-    include: { author: { select: { id: true, username: true, avatarColor: true } } },
+    include: {
+      author: { select: { id: true, username: true, avatarColor: true } },
+      reactions: { select: { emoji: true, userId: true } },
+    },
   });
 
-  res.json({ messages: messages.reverse() });
+  res.json({
+    messages: messages.reverse().map((m) => ({ ...m, reactions: groupReactions(m.reactions) })),
+  });
 });
 
 router.delete("/:id/messages", requireAuth, async (req: AuthedRequest, res) => {
