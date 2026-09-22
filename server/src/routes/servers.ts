@@ -2,6 +2,7 @@ import { Router } from "express";
 import crypto from "crypto";
 import { prisma } from "../db";
 import { requireAuth, type AuthedRequest } from "../auth";
+import { getIO } from "../io";
 
 const router = Router();
 
@@ -97,6 +98,7 @@ router.post("/:id/channels", requireAuth, async (req: AuthedRequest, res) => {
   const channel = await prisma.channel.create({
     data: { serverId: req.params.id, name: String(name).trim(), type, position: count },
   });
+  getIO().to(`server:${req.params.id}`).emit("channel:new", channel);
   res.status(201).json({ channel });
 });
 

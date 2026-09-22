@@ -10,7 +10,9 @@ import userRoutes from "./routes/users";
 import serverRoutes from "./routes/servers";
 import messageRoutes from "./routes/messages";
 import dmRoutes from "./routes/dms";
+import friendRoutes from "./routes/friends";
 import { registerSocketHandlers } from "./sockets";
+import { setIO } from "./io";
 
 const app = express();
 app.use(cors());
@@ -23,9 +25,11 @@ app.use("/api/users", userRoutes);
 app.use("/api/servers", serverRoutes);
 app.use("/api/channels", messageRoutes);
 app.use("/api/dms", dmRoutes);
+app.use("/api/friends", friendRoutes);
 
 const httpServer = createServer(app);
 const io = new Server(httpServer, { cors: { origin: "*" } });
+setIO(io);
 registerSocketHandlers(io);
 
 const PORT = Number(process.env.PORT) || 4000;

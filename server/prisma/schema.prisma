@@ -22,6 +22,35 @@ model User {
   dmMessages    DMMessage[]
   dmChannelsA   DMChannel[]     @relation("DMUserA")
   dmChannelsB   DMChannel[]     @relation("DMUserB")
+
+  sentFriendRequests     FriendRequest[] @relation("FriendRequestFrom")
+  receivedFriendRequests FriendRequest[] @relation("FriendRequestTo")
+  friendshipsA           Friendship[]    @relation("FriendshipA")
+  friendshipsB           Friendship[]    @relation("FriendshipB")
+}
+
+model FriendRequest {
+  id         String   @id @default(cuid())
+  fromUserId String
+  toUserId   String
+  createdAt  DateTime @default(now())
+
+  fromUser User @relation("FriendRequestFrom", fields: [fromUserId], references: [id])
+  toUser   User @relation("FriendRequestTo", fields: [toUserId], references: [id])
+
+  @@unique([fromUserId, toUserId])
+}
+
+model Friendship {
+  id        String   @id @default(cuid())
+  userAId   String
+  userBId   String
+  createdAt DateTime @default(now())
+
+  userA User @relation("FriendshipA", fields: [userAId], references: [id])
+  userB User @relation("FriendshipB", fields: [userBId], references: [id])
+
+  @@unique([userAId, userBId])
 }
 
 model Server {
@@ -90,6 +119,10 @@ model DMMessage {
   authorId    String
   content     String
   createdAt   DateTime @default(now())
+  type        String   @default("text") // text | call
+  callStatus  String? // answered | missed | declined | cancelled
+  callSeconds Int?
+  callParticipants Int?
 
   dmChannel DMChannel @relation(fields: [dmChannelId], references: [id])
   author    User      @relation(fields: [authorId], references: [id])

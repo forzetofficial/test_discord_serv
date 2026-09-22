@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { prisma } from "../db";
 import { requireAuth, type AuthedRequest } from "../auth";
+import { getIO } from "../io";
 
 const router = Router();
 
@@ -68,6 +69,20 @@ router.get("/:id/messages", requireAuth, async (req: AuthedRequest, res) => {
   });
 
   res.json({ messages: messages.reverse() });
+});
+
+router.delete("/:id/messages", requireAuth, async (req: AuthedRequest, res) => {
+  const userId = req.userId!;
+  const channel = await prisma.dMChannel.findUnique({ where: { id: req.params.id } });
+  if (!channel || (channel.userAId !== userId && channel.userBId !== userId)) {
+    return res.status(403).json({ error: "Not part of this conversation" });
+  }
+
+  await prisma.dMMessage.deleteMany({ where: { dmChannelId: channel.id } });
+
+  getIO().to(`user:${channel.userAId}`).to(`user:${channel.userBId}`).emit("dm:cleared", { dmChannelId: channel.id });
+
+  res.json({ ok: true });
 });
 
 export default router;
