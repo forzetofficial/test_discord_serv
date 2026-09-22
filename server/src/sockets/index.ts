@@ -1,0 +1,217 @@
+import type { Server, Socket } from "socket.io";
+import { prisma } from "../db";
+import { verifyToken } from "../auth";
+
+interface SocketData {
+  userId: string;
+  username: string;
+}
+
+// channelId -> set of socket ids currently in that voice channel
+const voiceRooms = new Map<string, Set<string>>();
+// channelId -> serverId, remembered so we can broadcast occupancy on leave/disconnect
+const channelServerMap = new Map<string, string>();
+
+function voiceRoom(channelId: string) {
+  if (!voiceRooms.has(channelId)) voiceRooms.set(channelId, new Set());
+  return voiceRooms.get(channelId)!;
+}
+
+function participantsOf(io: Server, channelId: string) {
+  const room = voiceRooms.get(channelId);
+  if (!room) return [];
+  return Array.from(room).map((id) => {
+    const s = io.sockets.sockets.get(id);
+    const data = s?.data as SocketData | undefined;
+    return { socketId: id, userId: data?.userId, username: data?.username };
+  });
+}
+
+function broadcastOccupancy(io: Server, channelId: string) {
+  const serverId = channelServerMap.get(channelId);
+  if (!serverId) return;
+  io.to(`server:${serverId}`).emit("voice:channel-participants", { channelId, participants: participantsOf(io, channelId) });
+}
+
+function leaveAllVoiceRooms(io: Server, socket: Socket) {
+  for (const [channelId, members] of voiceRooms) {
+    if (members.delete(socket.id)) {
+      socket.to(`voice:${channelId}`).emit("voice:user-left", { socketId: socket.id });
+      socket.leave(`voice:${channelId}`);
+      if (members.size === 0) voiceRooms.delete(channelId);
+      broadcastOccupancy(io, channelId);
+    }
+  }
+}
+
+export function registerSocketHandlers(io: Server) {
+  io.use((socket, next) => {
+    const token = socket.handshake.auth?.token as string | undefined;
+    const payload = token ? verifyToken(token) : null;
+    if (!payload) return next(new Error("Unauthorized"));
+
+    prisma.user.findUnique({ where: { id: payload.userId } }).then((user) => {
+      if (!user) return next(new Error("Unauthorized"));
+      (socket.data as SocketData) = { userId: user.id, username: user.username };
+      next();
+    }).catch(() => next(new Error("Unauthorized")));
+  });
+
+  io.on("connection", (socket: Socket) => {
+    const { userId, username } = socket.data as SocketData;
+    socket.join(`user:${userId}`);
+
+    // Register all listeners synchronously before awaiting anything, so events
+    // emitted by the client immediately after "connect" are never missed.
+    prisma.user.update({ where: { id: userId }, data: { status: "online" } }).then(() => {
+      socket.broadcast.emit("presence:update", { userId, status: "online" });
+    });
+
+    socket.on("channel:join", (channelId: string) => {
+      socket.join(`channel:${channelId}`);
+    });
+
+    socket.on("channel:leave", (channelId: string) => {
+      socket.leave(`channel:${channelId}`);
+    });
+
+    socket.on("message:send", async ({ channelId, content }: { channelId: string; content: string }) => {
+      const text = String(content ?? "").trim();
+      if (!text || !channelId) return;
+
+      const channel = await prisma.channel.findUnique({ where: { id: channelId } });
+      if (!channel) return;
+      const membership = await prisma.serverMember.findUnique({
+        where: { userId_serverId: { userId, serverId: channel.serverId } },
+      });
+      if (!membership) return;
+
+      const message = await prisma.message.create({
+        data: { channelId, authorId: userId, content: text.slice(0, 4000) },
+        include: { author: { select: { id: true, username: true, avatarColor: true } } },
+      });
+
+      io.to(`channel:${channelId}`).emit("message:new", message);
+    });
+
+    socket.on("dm:join", (dmChannelId: string) => {
+      socket.join(`dm:${dmChannelId}`);
+    });
+
+    socket.on("dm:leave", (dmChannelId: string) => {
+      socket.leave(`dm:${dmChannelId}`);
+    });
+
+    socket.on("dm:send", async ({ dmChannelId, content }: { dmChannelId: string; content: string }) => {
+      const text = String(content ?? "").trim();
+      if (!text || !dmChannelId) return;
+
+      const channel = await prisma.dMChannel.findUnique({ where: { id: dmChannelId } });
+      if (!channel || (channel.userAId !== userId && channel.userBId !== userId)) return;
+
+      const message = await prisma.dMMessage.create({
+        data: { dmChannelId, authorId: userId, content: text.slice(0, 4000) },
+        include: { author: { select: { id: true, username: true, avatarColor: true } } },
+      });
+
+      // Every connected socket is always in its own `user:${id}` room, so this
+      // alone delivers to both participants regardless of whether they have the
+      // DM open. Do not also emit to `dm:${dmChannelId}` — both participants are
+      // covered here, and adding that room would deliver the message twice to
+      // anyone who also joined it.
+      io.to(`user:${channel.userAId}`).to(`user:${channel.userBId}`).emit("dm:new", message);
+    });
+
+    socket.on("typing", ({ channelId }: { channelId: string }) => {
+      if (!channelId) return;
+      socket.to(`channel:${channelId}`).emit("typing", { channelId, userId, username });
+    });
+
+    // --- 1:1 DM calling (ringing handshake; the actual audio reuses the voice:* mesh below) ---
+    socket.on("call:invite", ({ dmChannelId, toUserId }: { dmChannelId: string; toUserId: string }) => {
+      if (!dmChannelId || !toUserId) return;
+      io.to(`user:${toUserId}`).emit("call:incoming", { dmChannelId, fromUserId: userId, fromUsername: username });
+    });
+
+    socket.on("call:cancel", ({ dmChannelId, toUserId }: { dmChannelId: string; toUserId: string }) => {
+      if (!dmChannelId || !toUserId) return;
+      io.to(`user:${toUserId}`).emit("call:cancelled", { dmChannelId, fromUserId: userId });
+    });
+
+    socket.on("call:decline", ({ dmChannelId, toUserId }: { dmChannelId: string; toUserId: string }) => {
+      if (!dmChannelId || !toUserId) return;
+      io.to(`user:${toUserId}`).emit("call:declined", { dmChannelId, fromUserId: userId });
+    });
+
+    socket.on("call:accept", ({ dmChannelId, toUserId }: { dmChannelId: string; toUserId: string }) => {
+      if (!dmChannelId || !toUserId) return;
+      io.to(`user:${toUserId}`).emit("call:accepted", { dmChannelId, fromUserId: userId });
+    });
+
+    socket.on("presence:set", async ({ status }: { status: string }) => {
+      if (!["online", "idle", "dnd"].includes(status)) return;
+      await prisma.user.update({ where: { id: userId }, data: { status } });
+      socket.broadcast.emit("presence:update", { userId, status });
+    });
+
+    socket.on("server:join", async (serverId: string) => {
+      socket.join(`server:${serverId}`);
+      const voiceChannels = await prisma.channel.findMany({ where: { serverId, type: "voice" } });
+      for (const ch of voiceChannels) {
+        channelServerMap.set(ch.id, serverId);
+        socket.emit("voice:channel-participants", { channelId: ch.id, participants: participantsOf(io, ch.id) });
+      }
+    });
+
+    socket.on("server:leave", (serverId: string) => {
+      socket.leave(`server:${serverId}`);
+    });
+
+    // --- Voice signaling (mesh WebRTC) ---
+    socket.on("voice:join", ({ channelId, serverId }: { channelId: string; serverId: string }) => {
+      channelServerMap.set(channelId, serverId);
+      const room = voiceRoom(channelId);
+      const existing = Array.from(room);
+      room.add(socket.id);
+      socket.join(`voice:${channelId}`);
+
+      socket.emit("voice:existing-participants", {
+        channelId,
+        participants: existing.map((id) => {
+          const s = io.sockets.sockets.get(id);
+          const data = s?.data as SocketData | undefined;
+          return { socketId: id, userId: data?.userId, username: data?.username };
+        }),
+      });
+
+      socket.to(`voice:${channelId}`).emit("voice:user-joined", { socketId: socket.id, userId, username });
+      broadcastOccupancy(io, channelId);
+    });
+
+    socket.on("voice:leave", (channelId: string) => {
+      const room = voiceRoom(channelId);
+      if (room.delete(socket.id)) {
+        socket.leave(`voice:${channelId}`);
+        socket.to(`voice:${channelId}`).emit("voice:user-left", { socketId: socket.id });
+        if (room.size === 0) voiceRooms.delete(channelId);
+        broadcastOccupancy(io, channelId);
+      }
+    });
+
+    socket.on("voice:signal", ({ to, data }: { to: string; data: unknown }) => {
+      if (!to) return;
+      io.to(to).emit("voice:signal", { from: socket.id, userId, username, data });
+    });
+
+    socket.on("voice:speaking", ({ channelId, speaking }: { channelId: string; speaking: boolean }) => {
+      if (!channelId) return;
+      socket.to(`voice:${channelId}`).emit("voice:speaking", { socketId: socket.id, speaking });
+    });
+
+    socket.on("disconnect", async () => {
+      leaveAllVoiceRooms(io, socket);
+      await prisma.user.update({ where: { id: userId }, data: { status: "offline" } }).catch(() => {});
+      socket.broadcast.emit("presence:update", { userId, status: "offline" });
+    });
+  });
+}

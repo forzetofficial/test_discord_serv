@@ -1,0 +1,15 @@
+node_modules/
+dist/
+dist-electron/
+release/
+out/
+.env
+*.log
+server/prisma/dev.db
+server/prisma/dev.db-journal
+.DS_Store
+
+# Only the server should be pushed to git
+/client/
+/package.json
+/package-lock.json

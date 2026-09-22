@@ -1,0 +1,96 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String   @id @default(cuid())
+  username     String   @unique
+  email        String   @unique
+  passwordHash String
+  avatarColor  String   @default("#5865f2")
+  status       String   @default("offline") // online | idle | dnd | offline
+  createdAt    DateTime @default(now())
+
+  ownedServers  Server[]        @relation("ServerOwner")
+  memberships   ServerMember[]
+  messages      Message[]
+  dmMessages    DMMessage[]
+  dmChannelsA   DMChannel[]     @relation("DMUserA")
+  dmChannelsB   DMChannel[]     @relation("DMUserB")
+}
+
+model Server {
+  id         String   @id @default(cuid())
+  name       String
+  ownerId    String
+  inviteCode String   @unique
+  createdAt  DateTime @default(now())
+
+  owner    User           @relation("ServerOwner", fields: [ownerId], references: [id])
+  members  ServerMember[]
+  channels Channel[]
+}
+
+model ServerMember {
+  id       String   @id @default(cuid())
+  userId   String
+  serverId String
+  joinedAt DateTime @default(now())
+
+  user   User   @relation(fields: [userId], references: [id])
+  server Server @relation(fields: [serverId], references: [id])
+
+  @@unique([userId, serverId])
+}
+
+model Channel {
+  id       String @id @default(cuid())
+  serverId String
+  name     String
+  type     String @default("text") // text | voice
+  position Int    @default(0)
+
+  server   Server    @relation(fields: [serverId], references: [id])
+  messages Message[]
+}
+
+model Message {
+  id        String   @id @default(cuid())
+  channelId String
+  authorId  String
+  content   String
+  createdAt DateTime @default(now())
+  editedAt  DateTime?
+
+  channel Channel @relation(fields: [channelId], references: [id])
+  author  User    @relation(fields: [authorId], references: [id])
+}
+
+model DMChannel {
+  id      String @id @default(cuid())
+  userAId String
+  userBId String
+
+  userA User @relation("DMUserA", fields: [userAId], references: [id])
+  userB User @relation("DMUserB", fields: [userBId], references: [id])
+
+  messages DMMessage[]
+
+  @@unique([userAId, userBId])
+}
+
+model DMMessage {
+  id          String   @id @default(cuid())
+  dmChannelId String
+  authorId    String
+  content     String
+  createdAt   DateTime @default(now())
+
+  dmChannel DMChannel @relation(fields: [dmChannelId], references: [id])
+  author    User      @relation(fields: [authorId], references: [id])
+}
